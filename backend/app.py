@@ -71,11 +71,12 @@ async def search_topic(
         return {"error": str(e)}
 
 @app.get("/scrape")
-async def scrape_url(url: str):
+async def scrape_and_summarize(url: str):
     """
-    Scrape a URL and extract the main content.
+    Scrape a URL, extract the main content, and summarize it using OpenAI API.
     """
     try:
+        # Scrape the content from the URL
         response = requests.get(url)
         response.raise_for_status()
         
@@ -86,35 +87,28 @@ async def scrape_url(url: str):
         filtered_p_list = [p.get_text() for p in p_list if len(p.get_text()) > 100]
         content = "\n".join(filtered_p_list)
 
-        return {"url": url, "content": content}  # Return as JSON
+        if not content:
+            raise HTTPException(status_code=400, detail="No sufficient content found to summarize.")
+
+        # Summarize the content using OpenAI API
+        try:
+            summary_response = await client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "You are a helpful summarization assistant."},
+                    {"role": "user", "content": f"Summarize this content in 200 words:\n{content}"}
+                ]
+            )
+            summary = summary_response.choices[0].message.content
+            return {"url": url, "summary": summary}
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Summarization failed: {str(e)}")
 
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail=f"Request failed: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
-
-@app.post("/summarize")
-async def summarize(request: SummarizeRequest):
-    """
-    Summarize the given content using OpenAI API.
-    """
-    content = request.content
-    
-    if not content:
-        raise HTTPException(status_code=400, detail="Please provide content to summarize.")
-
-    try:
-        response = await client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "You are a helpful summarization assistant."},
-                {"role": "user", "content": f"Summarize this content in 200 words:\n{content}"}
-            ]
-        )
-        summary = response.choices[0].message.content
-        return {"summary": summary}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
     
 if __name__ == "__main__":
     app.run(debug=True)
