@@ -1,7 +1,9 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 from httpx import AsyncClient
+from pydantic import BaseModel
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from openai import AsyncOpenAI
 import os
 import requests
 
@@ -16,6 +18,15 @@ async_client = AsyncClient()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_CX = os.getenv("GOOGLE_CX")
 BING_API_KEY = os.getenv("BING_API_KEY")
+
+client = AsyncOpenAI()
+
+# client = OpenAI(
+#   api_key=os.environ['OPENAI_API_KEY'],  # this is also the default, it can be omitted
+# )
+
+class SummarizeRequest(BaseModel):
+    content: str
 
 @app.get("/search")
 async def search_topic(
@@ -82,6 +93,28 @@ async def scrape_url(url: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
 
+@app.post("/summarize")
+async def summarize(request: SummarizeRequest):
+    """
+    Summarize the given content using OpenAI API.
+    """
+    content = request.content
+    
+    if not content:
+        raise HTTPException(status_code=400, detail="Please provide content to summarize.")
 
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are a helpful summarization assistant."},
+                {"role": "user", "content": f"Summarize this content in 200 words:\n{content}"}
+            ]
+        )
+        summary = response.choices[0].message.content
+        return {"summary": summary}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    
 if __name__ == "__main__":
     app.run(debug=True)
