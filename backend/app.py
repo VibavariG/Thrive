@@ -4,7 +4,6 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import os
 import requests
-import random
 
 load_dotenv()
 
@@ -63,34 +62,26 @@ async def search_topic(
 @app.get("/scrape")
 async def scrape_url(url: str):
     """
-    Scrape a URL for its content.
+    Scrape a URL and extract the main content.
     """
-    user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/89.0',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/91.0.864.64',
-        # Add more user agents as needed
-    ]
-
-    headers = {
-        'User-Agent': random.choice(user_agents)
-    }
     try:
-        # Fetch page content
-        response = requests.get(url, headers=headers)
-        print(response)
-        # response = await async_client.get(url)
+        response = requests.get(url)
         response.raise_for_status()
-        soup = BeautifulSoup(response.content, "html.parser")
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        p_list = soup.find_all('p')
+        
+        # Filter paragraphs with sufficient content
+        filtered_p_list = [p.get_text() for p in p_list if len(p.get_text()) > 100]
+        content = "\n".join(filtered_p_list)
 
-        # Extract visible text
-        text = soup.get_text(strip=True)
-        return {"url": url, "content": text[:1000]}  # Return first 1000 characters for brevity
+        return {"url": url, "content": content}  # Return as JSON
 
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Request failed: {e}")
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
 
-# Graceful shutdown
-@app.on_event("shutdown")
-async def shutdown_event():
-    await async_client.aclose()
+
+if __name__ == "__main__":
+    app.run(debug=True)
