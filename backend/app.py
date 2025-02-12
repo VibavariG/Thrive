@@ -13,16 +13,14 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global async_client
-    async_client = AsyncClient()  # Start client
+    async_client = AsyncClient()  # Start HTTP client
     yield
-    await async_client.aclose()  # Close client
+    await async_client.aclose()  # Close HTTP client
 
 app = FastAPI(lifespan=lifespan)
 
 logger = logging.getLogger("fastapi_app")
 load_dotenv()
-# app = FastAPI()
-# async_client = AsyncClient()            # Initialize HTTP client
 client = AsyncOpenAI()
 
 # API keys for search engines
