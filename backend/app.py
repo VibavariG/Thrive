@@ -1,29 +1,43 @@
 from fastapi import FastAPI, Query, HTTPException
-from httpx import AsyncClient
+from httpx import AsyncClient, HTTPStatusError, RequestError
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 import os
-import requests
+import asyncio
+import uvicorn
+import logging
+from contextlib import asynccontextmanager
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global async_client
+    async_client = AsyncClient()  # Start client
+    yield
+    await async_client.aclose()  # Close client
+
+app = FastAPI(lifespan=lifespan)
+
+logger = logging.getLogger("fastapi_app")
 load_dotenv()
-
-app = FastAPI()
-
-# Initialize HTTP client
-async_client = AsyncClient()
+# app = FastAPI()
+# async_client = AsyncClient()            # Initialize HTTP client
+client = AsyncOpenAI()
 
 # API keys for search engines
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_CX = os.getenv("GOOGLE_CX")
 BING_API_KEY = os.getenv("BING_API_KEY")
 
-client = AsyncOpenAI()
-
 # client = OpenAI(
 #   api_key=os.environ['OPENAI_API_KEY'],  # this is also the default, it can be omitted
 # )
+
+async def scrape_multiple_urls(urls):
+    tasks = [scrape_url(url) for url in urls]  # Collect coroutines
+    results = await asyncio.gather(*tasks)  # Execute them concurrently
+    return [result["content"] for result in results]  # Extract content
 
 class SummarizeRequest(BaseModel):
     content: str
@@ -71,44 +85,96 @@ async def search_topic(
         return {"error": str(e)}
 
 @app.get("/scrape")
-async def scrape_and_summarize(url: str):
+async def scrape_url(url: str):
     """
-    Scrape a URL, extract the main content, and summarize it using OpenAI API.
+    Scrape a URL and extract the main content.
     """
     try:
-        # Scrape the content from the URL
-        response = requests.get(url)
-        response.raise_for_status()
+        response = await async_client.get(url, timeout=10) 
+        response.raise_for_status()  # Raises an error for HTTP 4xx and 5xx responses
         
-        soup = BeautifulSoup(response.content, 'html.parser')
+        soup = BeautifulSoup(response.text, 'html.parser')  # Use response.text (not .content)
         p_list = soup.find_all('p')
-        
+
         # Filter paragraphs with sufficient content
-        filtered_p_list = [p.get_text() for p in p_list if len(p.get_text()) > 100]
-        content = "\n".join(filtered_p_list)
+        filtered_p_list = [p.get_text(strip=True) for p in p_list if len(p.get_text(strip=True)) > 100]
+        extracted_content = "\n".join(filtered_p_list)
 
-        if not content:
-            raise HTTPException(status_code=400, detail="No sufficient content found to summarize.")
+        if not extracted_content:
+            raise HTTPException(status_code=400, detail="No readable content found on the page.")
 
-        # Summarize the content using OpenAI API
-        try:
-            summary_response = await client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": "You are a helpful summarization assistant."},
-                    {"role": "user", "content": f"Summarize this content in 200 words:\n{content}"}
-                ]
-            )
-            summary = summary_response.choices[0].message.content
-            return {"url": url, "summary": summary}
-
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Summarization failed: {str(e)}")
-
-    except requests.exceptions.RequestException as e:
+        return {"url": url, "content": extracted_content}
+    except HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"HTTP error: {e}")
+    except RequestError as e:
         raise HTTPException(status_code=500, detail=f"Request failed: {e}")
+
+
+@app.post("/summarize")
+async def summarize(request: SummarizeRequest):
+    """
+    Summarize the given content using OpenAI API.
+    """
+    content = request.content
+    
+    if not content:
+        raise HTTPException(status_code=400, detail="Please provide content to summarize.")
+
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful summarization assistant."},
+                {"role": "user", "content": f"Summarize this content in 200 words:\n{content}"}
+            ],
+            temperature=0
+        )
+        summary = response.choices[0].message.content if response.choices else "No summary available."
+        return {"summary": summary}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+    
+@app.get("/search_scrape_summarize")
+async def search_scrape_summarize(topic: str, engine: str = "google"):
+    """
+    Perform a search, scrape the top 3 websites, and return a unified summary.
+    """
+    try:
+        # Step 1: Search for the topic
+        articles_response = await search_topic(topic, engine)
+
+        # Extract the "articles" list from the response
+        articles = articles_response["articles"]
+
+        # Get the top 3 URLs from the articles
+        urls = [article["link"] for article in articles[:3]]
+        # logger.debug("URLs extracted")
+
+        # Step 2: Scrape content from each URL
+        contents = await scrape_multiple_urls(urls)
+        all_content = "\n".join(contents)   
+        # logger.debug("Content from all 3 websites extracted")
+
+        # # Step 3: Split content into manageable chunks
+        max_chunk_size = 3000  # Adjust as needed to stay within limits
+        chunks = [all_content[i:i + max_chunk_size] for i in range(0, len(all_content), max_chunk_size)]
+        # logger.debug(f"Got all separate chunks: {len(chunks)}")
+
+        # Step 4: Summarize each chunk separately
+        tasks = [summarize(SummarizeRequest(content=chunk)) for chunk in chunks]
+        summaries = await asyncio.gather(*tasks)
+        chunk_summaries = [summary["summary"] for summary in summaries]
+        # logger.debug(f"Got summaries for each chunk: {len(chunk_summaries)}")
+
+        # Step 5: Summarize the combined summaries
+        final_summary_request = SummarizeRequest(content=" ".join(chunk_summaries))
+        final_summary = await summarize(final_summary_request)
+        # return {"topic": topic, "summary": final_summary, "sources": urls}
+        return final_summary
+
+    except Exception as e:
+        logger.error(f"An error occurred: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
     
 if __name__ == "__main__":
-    app.run(debug=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
